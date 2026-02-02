@@ -1,0 +1,10 @@
+{
+  "name": "@uai/runner",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "uvicorn app.main:app --reload --host 0.0.0.0 --port 8001",
+    "build": "echo 'Runner build complete'",
+    "clean": "rm -rf __pycache__ .pytest_cache"
+  }
+}

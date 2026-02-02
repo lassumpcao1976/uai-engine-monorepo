@@ -6,8 +6,9 @@ __pycache__
 venv/
 env/
 .venv
-artifacts/
-*.zip
-.pytest_cache/
+.pytest_cache
 .coverage
 htmlcov/
+*.egg-info
+.env
+.env.local

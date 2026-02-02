@@ -1,18 +1,21 @@
 FROM python:3.11-slim
 
-# Install Docker CLI (for Docker-in-Docker or Docker socket access)
+WORKDIR /app
+
+# Install Docker CLI
 RUN apt-get update && apt-get install -y \
     docker.io \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-
-COPY apps/runner/requirements.txt .
+# Copy requirements
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY apps/runner/main.py .
+# Copy application
+COPY . .
 
-# Expose runner port
+# Expose port
 EXPOSE 8001
 
-CMD ["python", "main.py"]
+# Run server
+CMD uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload

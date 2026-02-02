@@ -1,25 +1,41 @@
-.PHONY: dev prod lint test build clean
+.PHONY: help setup dev build test clean migrate
+
+help:
+	@echo "UAI Engine - Makefile Commands"
+	@echo ""
+	@echo "  make setup     - Initial setup (install deps, start infra, run migrations)"
+	@echo "  make dev        - Start all services in development mode"
+	@echo "  make build      - Build all services"
+	@echo "  make test       - Run all tests"
+	@echo "  make clean      - Clean build artifacts"
+	@echo "  make migrate    - Run database migrations"
+	@echo "  make up         - Start Docker Compose services"
+	@echo "  make down       - Stop Docker Compose services"
+	@echo "  make logs       - View Docker Compose logs"
+
+setup:
+	@./scripts/setup.sh
 
 dev:
-	docker compose -f infra/docker-compose.dev.yml up --build
-
-prod:
-	docker compose -f infra/docker-compose.yml up --build
-
-lint:
-	cd apps/web && npm run lint
-	cd apps/api && python -m flake8 . --max-line-length=100 --exclude=__pycache__,venv
-
-test:
-	cd apps/web && npm run test
-	cd apps/api && python -m pytest
+	@./scripts/dev.sh
 
 build:
-	docker compose -f infra/docker-compose.yml build
+	@pnpm build
+
+test:
+	@pnpm test
 
 clean:
-	docker compose -f infra/docker-compose.yml down -v
-	docker compose -f infra/docker-compose.dev.yml down -v
-	rm -rf apps/web/.next
-	rm -rf apps/api/__pycache__
-	rm -rf apps/api/artifacts/*
+	@pnpm clean
+
+migrate:
+	@cd apps/api && alembic upgrade head
+
+up:
+	@cd infra && docker-compose up -d
+
+down:
+	@cd infra && docker-compose down
+
+logs:
+	@cd infra && docker-compose logs -f
