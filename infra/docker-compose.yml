@@ -29,6 +29,23 @@ services:
       timeout: 5s
       retries: 5
 
+  buildkit:
+    image: moby/buildkit:latest
+    container_name: uai-buildkit
+    privileged: true
+    ports:
+      - "1234:1234"
+    environment:
+      BUILDKIT_TCP_TRANSPORT_ENABLED: "1"
+    volumes:
+      - buildkit_data:/var/lib/buildkit
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "buildctl", "debug", "workers"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   api:
     build:
       context: ../apps/api
@@ -55,18 +72,25 @@ services:
       context: ../apps/runner
       dockerfile: Dockerfile
     container_name: uai-runner
+    privileged: true
     environment:
       API_URL: http://api:8000
-      DOCKER_SOCKET: /var/run/docker.sock
+      BUILD_HOST: tcp://buildkit:1234
+      DOCKER_HOST: "http+unix://%2Fvar%2Frun%2Fdocker.sock"
+      DOCKER_TLS_VERIFY: ""
+      DOCKER_CERT_PATH: ""
     ports:
       - "8001:8001"
       - "30000-30100:30000-30100"
     depends_on:
-      - api
+      buildkit:
+        condition: service_healthy
+      api:
+        condition: service_started
     volumes:
       - ../apps/runner:/app
       - /var/run/docker.sock:/var/run/docker.sock
-    privileged: true
+    restart: unless-stopped
 
   web:
     build:
@@ -113,3 +137,4 @@ volumes:
   redis_data:
   prometheus_data:
   grafana_data:
+  buildkit_data:

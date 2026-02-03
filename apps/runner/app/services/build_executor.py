@@ -1,8 +1,7 @@
 import os
 import json
 import tempfile
-import shutil
-import docker
+import subprocess
 import httpx
 from pathlib import Path
 from typing import Dict, Any
@@ -12,8 +11,8 @@ from app.core.logging import logger
 
 class BuildExecutor:
     def __init__(self):
-        self.docker_client = docker.from_env()
         self.api_url = settings.api_url
+        self.build_host = settings.build_host
 
     async def execute_build(
         self,
@@ -22,76 +21,150 @@ class BuildExecutor:
         project_id: int,
         prompt: str,
     ) -> Dict[str, Any]:
-        """Execute a build in a sandboxed Docker container."""
+        """Execute a build using BuildKit."""
         logs = []
         
         try:
-            # Update build status to running
+            logger.info("build_submitted_to_buildkit", build_id=build_id, version_id=version_id)
             await self._update_build_status(build_id, "running", logs="Build started...\n")
             
             # Create temporary directory for build
             with tempfile.TemporaryDirectory() as build_dir:
-                # Generate Next.js project from template
                 project_path = Path(build_dir) / f"project-{project_id}"
                 project_path.mkdir()
                 
                 logs.append("Generating project structure...\n")
                 await self._generate_nextjs_project(project_path, prompt)
                 
-                # Build Docker image
-                logs.append("Building Docker image...\n")
-                image_tag = f"uai-build-{build_id}"
-                
+                # Generate Dockerfile
                 dockerfile_content = self._generate_dockerfile()
                 (project_path / "Dockerfile").write_text(dockerfile_content)
                 
+                # Build using BuildKit via docker buildx
+                logs.append("Building with BuildKit...\n")
+                image_tag = f"uai-build-{build_id}"
+                
+                logger.info("build_in_progress", build_id=build_id)
+                
+                # Create buildx builder pointing to BuildKit daemon
+                builder_name = f"buildkit-{build_id}"
+                create_builder_cmd = [
+                    "docker", "buildx", "create",
+                    "--name", builder_name,
+                    "--driver", "remote",
+                    "--driver-opt", f"server={self.build_host}",
+                    "--use",
+                ]
+                
+                # Create builder (ignore if already exists)
+                subprocess.run(create_builder_cmd, capture_output=True, timeout=10)
+                
+                # Use docker buildx to connect to BuildKit daemon
+                build_cmd = [
+                    "docker", "buildx", "build",
+                    "--builder", builder_name,
+                    "--load",
+                    "--tag", image_tag,
+                    "--progress", "plain",
+                    str(project_path),
+                ]
+                
+                env = os.environ.copy()
+                
                 try:
-                    image, build_logs = self.docker_client.images.build(
-                        path=str(project_path),
-                        tag=image_tag,
-                        rm=True,
-                        forcerm=True,
+                    process = subprocess.Popen(
+                        build_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        env=env,
+                        cwd=str(project_path),
                     )
-                    logs.extend([line.get("stream", "") for line in build_logs])
-                except docker.errors.BuildError as e:
-                    error_msg = f"Docker build failed: {str(e)}"
+                    
+                    # Stream build logs
+                    for line in process.stdout:
+                        if line.strip():
+                            logs.append(line)
+                            # Update logs periodically
+                            if len(logs) % 10 == 0:
+                                await self._update_build_status(
+                                    build_id, "running", logs="".join(logs)
+                                )
+                    
+                    process.wait()
+                    
+                    if process.returncode != 0:
+                        error_msg = f"BuildKit build failed with exit code {process.returncode}"
+                        logs.append(error_msg + "\n")
+                        logger.error("build_finished_with_status", build_id=build_id, status="failed")
+                        await self._update_build_status(
+                            build_id, "failed", logs="".join(logs), error_message=error_msg
+                        )
+                        return {"status": "failed", "logs": "".join(logs), "error": error_msg}
+                    
+                except Exception as e:
+                    error_msg = f"BuildKit build execution failed: {str(e)}"
                     logs.append(error_msg + "\n")
+                    logger.error("build_execution_failed", build_id=build_id, error=str(e))
                     await self._update_build_status(
                         build_id, "failed", logs="".join(logs), error_message=error_msg
                     )
                     return {"status": "failed", "logs": "".join(logs), "error": error_msg}
                 
-                # Run container
+                # Run container using docker run (still need docker CLI for this)
                 logs.append("Starting preview container...\n")
-                # Use a random port from the range
                 import random
                 port = random.randint(30000, 30100)
                 
-                container = self.docker_client.containers.run(
+                run_cmd = [
+                    "docker", "run",
+                    "-d",
+                    "--rm",
+                    "-p", f"{port}:3000",
+                    "--network", "bridge",
                     image_tag,
-                    detach=True,
-                    ports={"3000/tcp": port},
-                    remove=True,
-                    network_mode="bridge",
-                )
+                ]
                 
-                preview_url = f"http://localhost:{port}"
-                
-                logs.append(f"Preview available at {preview_url}\n")
-                
-                # Update build status to success
-                await self._update_build_status(
-                    build_id,
-                    "success",
-                    logs="".join(logs),
-                    preview_url=preview_url,
-                )
-                
-                return {
-                    "status": "success",
-                    "logs": "".join(logs),
-                    "preview_url": preview_url,
-                }
+                try:
+                    run_process = subprocess.run(
+                        run_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    
+                    if run_process.returncode != 0:
+                        error_msg = f"Failed to start container: {run_process.stderr}"
+                        logs.append(error_msg + "\n")
+                        await self._update_build_status(
+                            build_id, "failed", logs="".join(logs), error_message=error_msg
+                        )
+                        return {"status": "failed", "logs": "".join(logs), "error": error_msg}
+                    
+                    preview_url = f"http://localhost:{port}"
+                    logs.append(f"Preview available at {preview_url}\n")
+                    
+                    logger.info("build_finished_with_status", build_id=build_id, status="success")
+                    await self._update_build_status(
+                        build_id,
+                        "success",
+                        logs="".join(logs),
+                        preview_url=preview_url,
+                    )
+                    
+                    return {
+                        "status": "success",
+                        "logs": "".join(logs),
+                        "preview_url": preview_url,
+                    }
+                    
+                except subprocess.TimeoutExpired:
+                    error_msg = "Timeout starting container"
+                    logs.append(error_msg + "\n")
+                    await self._update_build_status(
+                        build_id, "failed", logs="".join(logs), error_message=error_msg
+                    )
+                    return {"status": "failed", "logs": "".join(logs), "error": error_msg}
                 
         except Exception as e:
             error_msg = f"Build execution failed: {str(e)}"
@@ -104,12 +177,10 @@ class BuildExecutor:
 
     async def _generate_nextjs_project(self, project_path: Path, prompt: str):
         """Generate a Next.js project structure based on prompt."""
-        # Create basic Next.js structure
         (project_path / "app").mkdir()
         (project_path / "public").mkdir()
         (project_path / "components").mkdir()
         
-        # Generate package.json
         package_json = {
             "name": "uai-project",
             "version": "1.0.0",
@@ -127,7 +198,6 @@ class BuildExecutor:
         }
         (project_path / "package.json").write_text(json.dumps(package_json, indent=2))
         
-        # Generate basic Next.js files
         (project_path / "app" / "layout.tsx").write_text(
             """export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -186,8 +256,8 @@ class BuildExecutor:
         )
 
     def _generate_dockerfile(self) -> str:
-        """Generate Dockerfile for Next.js build."""
-        return """FROM node:18-alpine AS base
+        """Generate Dockerfile for Next.js build using node:20-alpine."""
+        return """FROM node:20-alpine AS base
 
 # Install dependencies
 FROM base AS deps

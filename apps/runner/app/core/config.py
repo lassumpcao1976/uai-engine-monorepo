@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     api_url: str = "http://api:8000"
-    docker_socket: str = "/var/run/docker.sock"
+    build_host: str = "tcp://buildkit:1234"
     work_dir: str = "/tmp/uai-builds"
     
     class Config:
